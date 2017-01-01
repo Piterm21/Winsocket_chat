@@ -492,8 +492,6 @@ void runServer(SOCKET listenSocket)
 		Sleep(500);
 		SOCKET newConnectionSocket = accept(listenSocket, NULL, NULL);
 		if (newConnectionSocket != INVALID_SOCKET) {
-			u_long iMode = 1;
-			ioctlsocket(newConnectionSocket, FIONBIO, &iMode);
 			SOCKET receivers[1] = { newConnectionSocket };
 			if (currentConnections < MAX_CONNECTIONS) {
 				int firstEmpty = 0;
@@ -538,8 +536,6 @@ void runServer(SOCKET listenSocket)
 int initializeAndRunServer() 
 {
 	SOCKET listenSocket = handleServerInitialization();
-	u_long iMode = 1;
-	ioctlsocket(listenSocket, FIONBIO, &iMode);
 	if (listenSocket != INVALID_SOCKET) {
 		runServer(listenSocket);
 	}
@@ -570,8 +566,6 @@ client handleClientInitialization()
 
 	for (ptr = ptrServerData; ptr != NULL && (user.socket == INVALID_SOCKET); ptr = ptr->ai_next) {
 		user.socket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
-		u_long iMode = 1;
-		ioctlsocket(user.socket, FIONBIO, &iMode);
 
 		int connectResult = connect(user.socket, ptr->ai_addr, (int)ptr->ai_addrlen);
 		int lastError = WSAGetLastError();
