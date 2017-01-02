@@ -129,7 +129,7 @@ int handleSendMessage(SOCKET receivers[], int numberOfReceivers, string msg, int
 int checkSocketsForDisconnect(int numberOfSockets, vector<client> &clients, queue<message> &messages, bool &canWrite, bool &running)
 {
 	while (running) {
-		Sleep(4999);
+		Sleep(5000);
 		for (int i = 0; i < numberOfSockets; i++) {
 			if (clients[i].socket != INVALID_SOCKET) {
 				SOCKET receivers[1] = { clients[i].socket };
@@ -161,7 +161,6 @@ int checkServerForDisconnect(vector<client> &clients, queue<message> &messages, 
 
 void handleRecvMessage(SOCKET listeningSocket, queue<message> &messages, bool &canWrite)
 {
-	Sleep(500);
 	char receivingBuffer[BUFFER_LENGTH] = {};
 	int recvResult = recv(listeningSocket, receivingBuffer, BUFFER_LENGTH, 0);
 
@@ -276,6 +275,8 @@ SOCKET handleServerInitialization()
 	::bind(serverSocket, ptrServerData->ai_addr, (int)ptrServerData->ai_addrlen);
 	listen(serverSocket, SOMAXCONN);
 	freeaddrinfo(ptrServerData);
+	u_long iMode = 1;
+	ioctlsocket(serverSocket, FIONBIO, &iMode);
 
 	return serverSocket;
 }
@@ -491,6 +492,9 @@ void runServer(SOCKET listenSocket)
 		msg = "";
 		Sleep(500);
 		SOCKET newConnectionSocket = accept(listenSocket, NULL, NULL);
+		char optionsValue[3] = { '5', '0','0' };
+		setsockopt(newConnectionSocket, SOL_SOCKET, SO_RCVTIMEO, optionsValue, 3);
+		setsockopt(newConnectionSocket, SOL_SOCKET, SO_SNDTIMEO, optionsValue, 3);
 		if (newConnectionSocket != INVALID_SOCKET) {
 			SOCKET receivers[1] = { newConnectionSocket };
 			if (currentConnections < MAX_CONNECTIONS) {
@@ -637,6 +641,10 @@ int initizalizeAndRunClient()
 		queue<message> messages;
 		handleRecvMessage(newUser.socket, messages, canWrite);
 
+		char optionsValue[3] = { '5', '0','0' };
+		setsockopt(newUser.socket, SOL_SOCKET, SO_RCVTIMEO, optionsValue, 3);
+		setsockopt(newUser.socket, SOL_SOCKET, SO_SNDTIMEO, optionsValue, 3);
+
 		while (messages.size()) {
 			switch (messages.front().command) {
 			case (COMMAND_SOCKET_ERROR):
@@ -666,8 +674,8 @@ int initizalizeAndRunClient()
 						running = handleSendMessage(receivers, 1, msg);
 					}
 				}
-				listeningThread.join();
 				checkForServerDisconnect.join();
+				listeningThread.join();
 			} break;
 			default:
 			{
@@ -682,7 +690,6 @@ int initizalizeAndRunClient()
 	WSACleanup();
 	return 0;
 }
-
 
 int main() {
 	WSADATA wsaData;
