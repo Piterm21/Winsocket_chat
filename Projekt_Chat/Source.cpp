@@ -5,6 +5,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <queue>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -19,6 +20,7 @@ using namespace std;
 #define COMMAND_JOIN_CHANNEL 5
 #define COMMAND_LIST_USERS_ON_CHANNEL 6
 #define COMMAND_LEAVE_CHANNEL 7
+#define COMMAND_CHECK_ALIVE 8
 #define MAX_CONNECTIONS 5
 
 struct channel
@@ -55,7 +57,7 @@ int readServerCommand(bool &running)
 	return 0;
 }
 
-int handleSendMessage(SOCKET receivers[], int numberOfReceivers, string msg)
+int handleSendMessage(SOCKET receivers[], int numberOfReceivers, string msg, int commandPassedValue = 0)
 {
 	int characterCount = msg.length();
 	if (characterCount > BUFFER_LENGTH - 6) {
@@ -105,24 +107,63 @@ int handleSendMessage(SOCKET receivers[], int numberOfReceivers, string msg)
 		msgToSend += "a";
 	}
 	msgToSend += to_string(characterCount);
-	msgToSend += to_string(commandValue);
+	if (commandPassedValue == 0) {
+		msgToSend += to_string(commandValue);
+	} else {
+		msgToSend += to_string(commandPassedValue);
+	}
 	characterCount = msg.length();
 	for (int i = msgOffset; i < characterCount; i++) {
 		msgToSend += msg[i];
 	}
 	for (i = 0; i < numberOfReceivers; i++) {
-		send(receivers[i], msgToSend.c_str(), characterCount+5-msgOffset, 0);
+		int sendResult = send(receivers[i], msgToSend.c_str(), characterCount + 5 - msgOffset, 0);
+		int lastError = WSAGetLastError();
+		if (numberOfReceivers == 1 && sendResult == SOCKET_ERROR && lastError != WSAEWOULDBLOCK) {
+			return -1;
+		}
 	}
 	return 1;
 }
 
-vector<message> handleRecvMessage(SOCKET listeningSocket)
+int checkSocketsForDisconnect(int numberOfSockets, vector<client> &clients, queue<message> &messages, bool &canWrite, bool &running)
+{
+	while (running) {
+		Sleep(4999);
+		for (int i = 0; i < numberOfSockets; i++) {
+			if (clients[i].socket != INVALID_SOCKET) {
+				SOCKET receivers[1] = { clients[i].socket };
+				int sendResult = handleSendMessage(receivers, 1, "CHECK_ALIVE", COMMAND_CHECK_ALIVE);
+				if (sendResult == -1) {
+					while (!canWrite) {
+					}
+					canWrite = false;
+					message socketDisconnectedMessage;
+					socketDisconnectedMessage.command = -1;
+					messages.push(socketDisconnectedMessage);
+					canWrite = true;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+int checkClientsForDisconnect(vector<client> &clients, queue<message> &messages, bool &canWrite, bool &running)
+{
+	return checkSocketsForDisconnect(MAX_CONNECTIONS, clients, messages, canWrite, running);
+}
+
+int checkServerForDisconnect(vector<client> &clients, queue<message> &messages, bool &canWrite, bool &running)
+{
+	return checkSocketsForDisconnect(1, clients, messages, canWrite, running);
+}
+
+void handleRecvMessage(SOCKET listeningSocket, queue<message> &messages, bool &canWrite)
 {
 	Sleep(500);
 	char receivingBuffer[BUFFER_LENGTH] = {};
 	int recvResult = recv(listeningSocket, receivingBuffer, BUFFER_LENGTH, 0);
-
-	vector<message> result;
 
 	int lastError = WSAGetLastError();
 
@@ -132,51 +173,71 @@ vector<message> handleRecvMessage(SOCKET listeningSocket)
 			msg.command = -1;
 			msg.length = 0;
 			msg.msg = "";
-			result.push_back(msg);
-			return result;
-		} else {
-			return result;
+			while (!canWrite) {
+			}
+			canWrite = false;
+			messages.push(msg);
+			canWrite = true;
 		}
+		return;
 	}
 	int msgLength = 0;
 	int charactersRead = 0;
 	int currentIndex = 0;
 	int endValue = currentIndex + 4;
-	while (msgLength == 0 || charactersRead < recvResult) {
-		for (currentIndex; currentIndex < endValue; currentIndex++) {
+	while (charactersRead < recvResult) {
+		int powerValue = 3;
+		while (currentIndex < endValue && currentIndex < recvResult) {
 			if (receivingBuffer[currentIndex] != 'a') {
-				msgLength += ((receivingBuffer[currentIndex] - '0') * (int)pow(10, (3 - currentIndex)));
+				msgLength += ((receivingBuffer[currentIndex] - '0') * (int)pow(10, powerValue));
 			}
+			currentIndex++;
+			powerValue--;
 		}
 		int command = 0;
 		endValue = currentIndex + 1;
-		for (currentIndex; currentIndex < endValue; currentIndex++) {
+		while (currentIndex < endValue && currentIndex < recvResult) {
 			command = receivingBuffer[currentIndex] - '0';
+			currentIndex++;
 		}
 		message msg = { "", 0, 0 };
 		msg.length = msgLength;
 		msg.command = command;
-		for (currentIndex; currentIndex < charactersRead + msgLength + 5; currentIndex++) {
+		while (currentIndex < charactersRead + msgLength + 5 && currentIndex < recvResult) {
 			msg.msg += receivingBuffer[currentIndex];
+			currentIndex++;
 		}
 		charactersRead += msgLength + 5;
 		endValue = charactersRead + 4;
 
-		result.push_back(msg);
+		while (!canWrite) {
+		}
+		canWrite = false;
+		messages.push(msg);
+		canWrite = true;
+		msgLength = 0;
 	}
-
-	return result;
 }
 
 void handleChannelChange(client &currentClient, vector<channel> &channels, int newChannelIndex, bool create)
 {
 	string msg = string(BUFFER_LENGTH, '\0');
 	msg = "";
+	if (currentClient.channel->name == channels[newChannelIndex].name) {
+		msg = "Nie mozna opuscic glownego kanalu";
+		SOCKET recevicers[1] = { currentClient.socket };
+		handleSendMessage(recevicers, 1, msg);
+		return;
+	}
 
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 		if (currentClient.channel->clientNames[i] == currentClient.id) {
 			currentClient.channel->clientNames[i] = "";
-			i = MAX_CONNECTIONS;
+			for (int j = i + 1; j < MAX_CONNECTIONS; j++) {
+				currentClient.channel->clientNames[i] = currentClient.channel->clientNames[j];
+				currentClient.channel->clientNames[j] = "";
+				i++;
+			}
 		}
 	}
 	currentClient.channel->currentClients--;
@@ -269,34 +330,34 @@ void cleanUpClient(client &currentClient, vector<client>&clients)
 	handleSendMessage(receivers, numberOfReceivers, msg);
 }
 
-int handleClientListing(client &currentClient, vector<client>&clients, thread &thread, int &currentConnections, vector<channel> &channels)
+int handleClientListing(client &currentClient, vector<client>&clients, thread &thread, int &currentConnections, vector<channel> &channels, queue<message> &messages, bool &canWrite, bool &running)
 {
-	bool running = true;
 	currentClient.channel = &channels[0];
 	currentClient.channelIndex = 0;
 	string nameArray[MAX_CONNECTIONS];
+	bool threadRunning = true;
 
-	while (running) {
-		vector<message> messages = handleRecvMessage(currentClient.socket);
+	while (running && threadRunning) {
+		handleRecvMessage(currentClient.socket, messages, canWrite);
 
-		for (int i = 0; i < messages.size(); i++) {
+		while (messages.size()) {
 			SOCKET receivers[MAX_CONNECTIONS] = {};
 			int numberOfReceivers = 0;
 			string msg = string(BUFFER_LENGTH, '\0');
 			msg = "";
-			switch (messages[i].command) {
+			switch (messages.front().command) {
 			case (COMMAND_DISCONNECT):
 			case (COMMAND_SOCKET_ERROR): {
 				cleanUpClient(currentClient, clients);
 				currentConnections--;
-				running = false;
+				threadRunning = false;
 			} break;
 			case (COMMAND_CHANGE_NAME): {
-				string newNick = string(messages[i].msg);
+				string newNick = string(messages.front().msg);
 				if (newNick != "") {
 					bool nickFree = true;
 					for (int j = 0; j < MAX_CONNECTIONS; j++) {
-						if (newNick == clients[i].id) {
+						if (newNick == clients[j].id) {
 							nickFree = false;
 							j = MAX_CONNECTIONS;
 						}
@@ -317,7 +378,7 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 				}
 			} break;
 			case (COMMAND_CREATE_CHANNEL): {
-				string channelName = messages[i].msg;
+				string channelName = messages.front().msg;
 				if (channelName != "") {
 					bool channelNameUnique = true;
 					int j = 0;
@@ -367,7 +428,7 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 				}
 			} break;
 			case (COMMAND_JOIN_CHANNEL): {
-				string channelToJoin = messages[i].msg;
+				string channelToJoin = messages.front().msg;
 				if (channelToJoin != "") {
 					bool channelChanged = false;
 					for (int j = 0; j < channels.size(); j++) {
@@ -393,8 +454,10 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 			case (COMMAND_LEAVE_CHANNEL): {
 				handleChannelChange(currentClient, channels, 0, 0);
 			} break;
+			case (COMMAND_CHECK_ALIVE): {
+			} break;
 			default: {
-				msg = "[" + currentClient.channel->name + "]" + currentClient.id + ": " + messages[i].msg;
+				msg = "[" + currentClient.channel->name + "]" + currentClient.id + ": " + messages.front().msg;
 				cout << msg.c_str() << endl;
 
 				for (int j = 0; j < MAX_CONNECTIONS; j++) {
@@ -407,6 +470,7 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 				}
 			} break;
 			}
+			messages.pop();
 			handleSendMessage(receivers, numberOfReceivers, msg);
 		}
 	}
@@ -435,7 +499,10 @@ void runServer(SOCKET listenSocket)
 
 	thread workerThreads[MAX_CONNECTIONS];
 	bool running = true;
+	bool canWrite = true;
 	thread readServerCommandThread = thread(readServerCommand, ref(running));
+	queue<message> messages;
+	thread checkIfClientsAreAlive = thread(checkClientsForDisconnect, ref(clients) ,ref(messages), ref(canWrite), ref(running));
 
 	while (running) {
 		string msg = string(BUFFER_LENGTH, '\0');
@@ -445,15 +512,25 @@ void runServer(SOCKET listenSocket)
 		if (newConnectionSocket != INVALID_SOCKET) {
 			u_long iMode = 1;
 			ioctlsocket(newConnectionSocket, FIONBIO, &iMode);
+			int firstEmpty = 0;
 			SOCKET receivers[1] = { newConnectionSocket };
+			SOCKET receiversNewClient[MAX_CONNECTIONS] = {};
+			int receiversCount = 0;
+			string msgToClients = "";
 			if (currentConnections < MAX_CONNECTIONS) {
-				int firstEmpty = 0;
 				while (clients[firstEmpty].socket != INVALID_SOCKET) {
 					firstEmpty++;
 				}
 				currentConnections++;
 				clients[firstEmpty].id = "Anon#" + to_string(newConnectionFreeIndex);
-				cout << "Client: " + clients[firstEmpty].id + " Connected" << endl;
+				msgToClients = "Client: " + clients[firstEmpty].id + " Connected";
+				cout << msgToClients << endl;
+				for (int i = 0; i < MAX_CONNECTIONS; i++) {
+					if (i != firstEmpty && clients[i].channel->name == globalChannel.name && clients[i].socket != INVALID_SOCKET) {
+						receiversNewClient[receiversCount] = clients[i].socket;
+						receiversCount++;
+					}
+				}
 				clients[firstEmpty].socket = newConnectionSocket;
 				msg = "NICK " + clients[firstEmpty].id;
 				channels[0].currentClients++;
@@ -463,21 +540,22 @@ void runServer(SOCKET listenSocket)
 				}
 				channels[0].clientNames[i] = clients[firstEmpty].id;
 
-				workerThreads[firstEmpty] = thread(handleClientListing, ref(clients[firstEmpty]), ref(clients), ref(workerThreads[firstEmpty]), ref(currentConnections), ref(channels));
+				workerThreads[firstEmpty] = thread(handleClientListing, ref(clients[firstEmpty]), ref(clients), ref(workerThreads[firstEmpty]), ref(currentConnections), ref(channels), ref(messages), ref(canWrite), ref(running));
 				newConnectionFreeIndex++;
 			} else {
 				msg = "Serwer jest pelny";
 			}
 			handleSendMessage(receivers, 1, msg);
+			handleSendMessage(receiversNewClient, receiversCount, msgToClients);
 		}
 	}
-
-	readServerCommandThread.detach();
+	readServerCommandThread.join();
+	checkIfClientsAreAlive.join();
 	closesocket(listenSocket);
 	for (int i = 0; i < MAX_CONNECTIONS; i++)
 	{
 		if (workerThreads[i].joinable()) {
-			workerThreads[i].detach();
+			workerThreads[i].join();
 		}
 		if (clients[i].socket != INVALID_SOCKET) {
 			closesocket(clients[i].socket);
@@ -549,14 +627,14 @@ client handleClientInitialization()
 	return user;
 }
 
-int listenToServer(client &user)
+int listenToServer(client &user, bool &running, bool &canWrite)
 {
-	bool running = true;
-
+	queue<message> messages;
+	
 	while (running) {
-		vector<message> messages = handleRecvMessage(user.socket);
-		for (int i = 0; i < messages.size(); i++) {
-			switch (messages[i].command) {
+		handleRecvMessage(user.socket, messages , canWrite);
+		while (messages.size()) {
+			switch (messages.front().command) {
 			case (COMMAND_SOCKET_ERROR):
 			case (COMMAND_DISCONNECT):
 			{
@@ -564,17 +642,21 @@ int listenToServer(client &user)
 			} break;
 			case (COMMAND_CHANGE_NAME):
 			{
-				user.id = messages[i].msg;
+				user.id = messages.front().msg;
 			} break;
 			case (COMMAND_CREATE_CHANNEL):
 			{
-				user.channel->name = messages[i].msg;
+				user.channel->name = messages.front().msg;
+			} break;
+			case (COMMAND_CHECK_ALIVE):
+			{
 			} break;
 			default: 
 			{
-				cout << messages[i].msg << endl;
+				cout << messages.front().msg << endl;
 			} break;
 			}
+			messages.pop();
 		}
 	}
 	return 0;
@@ -583,44 +665,54 @@ int listenToServer(client &user)
 int initizalizeAndRunClient()
 {
 	client newUser = handleClientInitialization();
+	bool running = true;
+	bool canWrite = true;
 	if (newUser.socket != INVALID_SOCKET) {
 		cout << "Polaczono poprawnie do socketa" << endl;
-		vector<message> messages = handleRecvMessage(newUser.socket);
+		queue<message> messages;
+		handleRecvMessage(newUser.socket, messages, canWrite);
 
-		for (int i = 0; i < messages.size(); i++) {
-			switch (messages[i].command) {
+		while (messages.size()) {
+			switch (messages.front().command) {
 			case (COMMAND_SOCKET_ERROR):
 			{
-				cout << "Polaczenie nieudane" << endl;
-				WSACleanup();
-				return 1;
+				if (running) {
+					cout << "Polaczenie nieudane" << endl;
+					WSACleanup();
+					return 1;
+				}
 			} break;
 			case (COMMAND_CHANGE_NAME):
 			{
-				newUser.id = string(messages[i].length - 5, '0');
-				memcpy(&newUser.id, &messages[i].msg + 5, ((sizeof(char))*messages[i].length - 5));
-				thread listeningThread = thread(listenToServer, ref(newUser));
-				bool running = true;
+				newUser.id = "";
+				for (int i = 5; i < messages.front().msg.length(); i++) {
+					newUser.id += messages.front().msg[i];
+				}
+				thread listeningThread = thread(listenToServer, ref(newUser), ref(running), ref(canWrite));
+				vector<client> server;
+				server.push_back(newUser);
+				thread checkForServerDisconnect = thread(checkServerForDisconnect, ref(server), ref(messages), ref(canWrite), ref(running));
 				while (running) {
 					string msg = string(BUFFER_LENGTH, '\0');
 					msg = "";
 					SOCKET receivers[1] = { newUser.socket };
 					getline(cin, msg);
-					if (msg != "") {
+					if (msg != "" && running) {
 						running = handleSendMessage(receivers, 1, msg);
 					}
 				}
-				listeningThread.detach();
+				listeningThread.join();
+				checkForServerDisconnect.join();
 			} break;
 			default:
 			{
-				cout << messages[i].msg << endl;
+				cout << messages.front().msg << endl;
 			}break;
 			}
+			messages.pop();
 		}
 	}
 	cout << "Rozlaczanie socketa" << endl;
-	shutdown(newUser.socket, SD_SEND);
 	closesocket(newUser.socket);
 	WSACleanup();
 	return 0;
