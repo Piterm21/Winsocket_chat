@@ -185,22 +185,27 @@ void handleRecvMessage(SOCKET listeningSocket, queue<message> &messages, bool &c
 	int charactersRead = 0;
 	int currentIndex = 0;
 	int endValue = currentIndex + 4;
-	while (msgLength == 0 || charactersRead < recvResult) {
-		for (currentIndex; currentIndex < endValue; currentIndex++) {
+	while (charactersRead < recvResult) {
+		int powerValue = 3;
+		while (currentIndex < endValue && currentIndex < recvResult) {
 			if (receivingBuffer[currentIndex] != 'a') {
-				msgLength += ((receivingBuffer[currentIndex] - '0') * (int)pow(10, (3 - currentIndex)));
+				msgLength += ((receivingBuffer[currentIndex] - '0') * (int)pow(10, powerValue));
 			}
+			currentIndex++;
+			powerValue--;
 		}
 		int command = 0;
 		endValue = currentIndex + 1;
-		for (currentIndex; currentIndex < endValue; currentIndex++) {
+		while (currentIndex < endValue && currentIndex < recvResult) {
 			command = receivingBuffer[currentIndex] - '0';
+			currentIndex++;
 		}
 		message msg = { "", 0, 0 };
 		msg.length = msgLength;
 		msg.command = command;
-		for (currentIndex; currentIndex < charactersRead + msgLength + 5; currentIndex++) {
+		while (currentIndex < charactersRead + msgLength + 5 && currentIndex < recvResult) {
 			msg.msg += receivingBuffer[currentIndex];
+			currentIndex++;
 		}
 		charactersRead += msgLength + 5;
 		endValue = charactersRead + 4;
@@ -210,6 +215,7 @@ void handleRecvMessage(SOCKET listeningSocket, queue<message> &messages, bool &c
 		canWrite = false;
 		messages.push(msg);
 		canWrite = true;
+		msgLength = 0;
 	}
 }
 
@@ -217,11 +223,21 @@ void handleChannelChange(client &currentClient, vector<channel> &channels, int n
 {
 	string msg = string(BUFFER_LENGTH, '\0');
 	msg = "";
+	if (currentClient.channel->name == channels[newChannelIndex].name) {
+		msg = "Nie mozna opuscic glownego kanalu";
+		SOCKET recevicers[1] = { currentClient.socket };
+		handleSendMessage(recevicers, 1, msg);
+		return;
+	}
 
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 		if (currentClient.channel->clientNames[i] == currentClient.id) {
 			currentClient.channel->clientNames[i] = "";
-			i = MAX_CONNECTIONS;
+			for (int j = i + 1; j < MAX_CONNECTIONS; j++) {
+				currentClient.channel->clientNames[i] = currentClient.channel->clientNames[j];
+				currentClient.channel->clientNames[j] = "";
+				i++;
+			}
 		}
 	}
 	currentClient.channel->currentClients--;
@@ -319,8 +335,9 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 	currentClient.channel = &channels[0];
 	currentClient.channelIndex = 0;
 	string nameArray[MAX_CONNECTIONS];
+	bool threadRunning = true;
 
-	while (running) {
+	while (running && threadRunning) {
 		handleRecvMessage(currentClient.socket, messages, canWrite);
 
 		while (messages.size()) {
@@ -333,14 +350,14 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 			case (COMMAND_SOCKET_ERROR): {
 				cleanUpClient(currentClient, clients);
 				currentConnections--;
-				running = false;
+				threadRunning = false;
 			} break;
 			case (COMMAND_CHANGE_NAME): {
 				string newNick = string(messages.front().msg);
 				if (newNick != "") {
 					bool nickFree = true;
 					for (int j = 0; j < MAX_CONNECTIONS; j++) {
-						if (newNick == clients[0].id) {
+						if (newNick == clients[j].id) {
 							nickFree = false;
 							j = MAX_CONNECTIONS;
 						}
@@ -457,6 +474,7 @@ int handleClientListing(client &currentClient, vector<client>&clients, thread &t
 			handleSendMessage(receivers, numberOfReceivers, msg);
 		}
 	}
+	thread.detach();
 	return 0;
 }
 
@@ -494,15 +512,25 @@ void runServer(SOCKET listenSocket)
 		if (newConnectionSocket != INVALID_SOCKET) {
 			u_long iMode = 1;
 			ioctlsocket(newConnectionSocket, FIONBIO, &iMode);
+			int firstEmpty = 0;
 			SOCKET receivers[1] = { newConnectionSocket };
+			SOCKET receiversNewClient[MAX_CONNECTIONS] = {};
+			int receiversCount = 0;
+			string msgToClients = "";
 			if (currentConnections < MAX_CONNECTIONS) {
-				int firstEmpty = 0;
 				while (clients[firstEmpty].socket != INVALID_SOCKET) {
 					firstEmpty++;
 				}
 				currentConnections++;
 				clients[firstEmpty].id = "Anon#" + to_string(newConnectionFreeIndex);
-				cout << "Client: " + clients[firstEmpty].id + " Connected" << endl;
+				msgToClients = "Client: " + clients[firstEmpty].id + " Connected";
+				cout << msgToClients << endl;
+				for (int i = 0; i < MAX_CONNECTIONS; i++) {
+					if (i != firstEmpty && clients[i].channel->name == globalChannel.name && clients[i].socket != INVALID_SOCKET) {
+						receiversNewClient[receiversCount] = clients[i].socket;
+						receiversCount++;
+					}
+				}
 				clients[firstEmpty].socket = newConnectionSocket;
 				msg = "NICK " + clients[firstEmpty].id;
 				channels[0].currentClients++;
@@ -518,6 +546,7 @@ void runServer(SOCKET listenSocket)
 				msg = "Serwer jest pelny";
 			}
 			handleSendMessage(receivers, 1, msg);
+			handleSendMessage(receiversNewClient, receiversCount, msgToClients);
 		}
 	}
 	readServerCommandThread.join();
